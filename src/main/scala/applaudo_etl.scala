@@ -1,5 +1,5 @@
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Encoders, SparkSession}
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
@@ -12,6 +12,8 @@ object applaudo_etl {
   val containerName: String = "ordersdow"
   val storageAccountName: String = "orderstg"
   val productSchema = Encoders.product[Product].schema
+  val bucket = "test-bucket-concrete-flare-312721"
+  // BigQuery parameters
 
 
   def main(args: Array[String]): Unit = {
@@ -19,18 +21,26 @@ object applaudo_etl {
     //    val spark = SparkSession.builder.appName("ScalaTest").master("local[*]").getOrCreate()
     val spark = SparkSession.builder.appName("AppaludoETL").getOrCreate()
     spark.conf.set(s"fs.azure.sas.$containerName.$storageAccountName.blob.core.windows.net", key)
+    spark.conf.set("temporaryGcsBucket", bucket)
 
     // Test DataFrame from API
-    getDataFromAPI(spark)
+    val dfProductDetails = getDataFromAPI(spark).withColumnRenamed("aisle", "aisle_json")
 
     // Transform both DataFrames
     val dfProducts = transformData(getDataFromBlobStorage(spark), getDataFromSQLServer(spark))
-    println(dfProducts.printSchema())
-    dfProducts.show(10, truncate = false)
-    println(dfProducts.count())
+
+    // Join datasets
+    val dfJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
+    ("product_name"), "left")
+
+    dfProductDetails.write.format("bigquery")
+      .option("table", "test.product_details")
+      .save()
 
     // Validate Data
-    validateData(dfProducts)
+    validateData(dfJoined).write.format("bigquery")
+      .option("table", "test.products")
+      .save()
 
   }
 
@@ -38,6 +48,33 @@ object applaudo_etl {
     val path = s"wasbs://$containerName@$storageAccountName.blob.core.windows.net"
     spark.read.schema(productSchema).option("header", "false").option("mode", "DROPMALFORMED").csv(path + "/0*.csv")
 
+  }
+
+
+  def getDataFromSQLServer(spark: SparkSession): DataFrame = {
+    val df = spark.read
+      .format("jdbc")
+      .option("driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver")
+      .option("url", "jdbc:sqlserver://orderservers.database.windows.net;database=orderdb")
+      .option("dbtable", "dbo.order_details")
+      .option("user", "etlguest")
+      .option("password", "Etltest_2020")
+      .load()
+
+    productSchema.fields.foldLeft(df) {
+      (df, s) => df.withColumn(s.name, df(s.name).cast(s.dataType))
+    }
+  }
+
+  def getDataFromAPI(spark: SparkSession): DataFrame = {
+    val url = "https://etlwebapp.azurewebsites.net/api/products"
+    implicit val formats = DefaultFormats
+    val data = List(scala.io.Source.fromURL(url).mkString)(0)
+    val jsonData = parse(data)
+    val elements = (jsonData \\ "results" \\ "items").children.map(_.extract[ProductDetail])
+    // For implicit conversions like converting RDDs to DataFrames
+    import spark.implicits._
+    elements.toDF()
   }
 
   def transformData(dataFromBlob: DataFrame, dataFromSQLServer: DataFrame): DataFrame = {
@@ -50,57 +87,19 @@ object applaudo_etl {
       .drop("order_detail", "order_detail_array", "order_detail_exploded")
   }
 
-  def getDataFromSQLServer(spark: SparkSession): DataFrame = {
-    val df = spark.read
-      .format("jdbc")
-      .option("driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver")
-      .option("url", "jdbc:sqlserver://orderservers.database.windows.net;database=orderdb")
-      .option("dbtable", "dbo.order_details")
-      .option("user", "etlguest")
-      .option("password", "Etltest_2020")
-      .load()
-
-    val newDf = productSchema.fields.foldLeft(df) {
-      (df, s) => df.withColumn(s.name, df(s.name).cast(s.dataType))
-    }
-
-    newDf
-  }
-
-  def getDataFromAPI(spark: SparkSession): Unit = {
-    val url = "https://etlwebapp.azurewebsites.net/api/products"
-    implicit val formats = DefaultFormats
-    val result2 = List(scala.io.Source.fromURL(url).mkString)(0)
-    val json_data = parse(result2)
-    val elements = (json_data \\ "results" \\ "items").children.map(_.extract[ProductDetail])
-    val rdd = spark.sparkContext.makeRDD(elements)
-    // For implicit conversions like converting RDDs to DataFrames
-    import spark.implicits._
-    val df = elements.toDF()
-    df.show(10)
-    println(df.count())
-    println(df.printSchema())
-  }
-
-  def validateData(df: DataFrame) = {
-    val validate = udf((s: Any) => {
-      s match {
-        case _: String => trim(_)
-        case _: Long => abs(_)
-        case _: Int => abs(_)
-        case _: Long => abs(_)
-        case _ => _
+  def validateData(df: DataFrame): DataFrame = {
+    df.schema.fields.foldLeft(df) {
+      (df, s) => {
+        s.dataType match {
+          case _: StringType => df.withColumn(s.name, trim(df(s.name)))
+          case _: IntegerType => df.withColumn(s.name, abs(df(s.name)))
+          case _: LongType => df.withColumn(s.name, abs(df(s.name)))
+          case _: FloatType => df.withColumn(s.name, abs(df(s.name)))
+          case _: DoubleType => df.withColumn(s.name, abs(df(s.name)))
+          case _ => df.withColumn(s.name, df(s.name))
+        }
       }
-    })
-
-    println(df.filter(col("order_hour_of_day") > 0).count())
-
-    val newDf = productSchema.fields.foldLeft(df) {
-      (df, s) => df.withColumn(s.name, validate(df(s.name)))
     }
-    println(newDf.count())
-    println(newDf.filter(col("order_hour_of_day") > 0).count())
-    newDf.show()
   }
 }
 
