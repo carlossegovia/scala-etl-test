@@ -12,8 +12,8 @@ object applaudo_etl {
   val containerName: String = "ordersdow"
   val storageAccountName: String = "orderstg"
   val productSchema = Encoders.product[Product].schema
-  val bucket = "test-bucket-concrete-flare-312721"
   // BigQuery parameters
+  val bucket = "test-bucket-concrete-flare-312721"
 
 
   def main(args: Array[String]): Unit = {
@@ -23,22 +23,18 @@ object applaudo_etl {
     spark.conf.set(s"fs.azure.sas.$containerName.$storageAccountName.blob.core.windows.net", key)
     spark.conf.set("temporaryGcsBucket", bucket)
 
-    // Test DataFrame from API
-    val dfProductDetails = getDataFromAPI(spark).withColumnRenamed("aisle", "aisle_json")
+    // Merge both Product's DataFrames
+    val dfProducts = mergeProductData(getDataFromBlobStorage(spark), getDataFromSQLServer(spark))
 
-    // Transform both DataFrames
-    val dfProducts = transformData(getDataFromBlobStorage(spark), getDataFromSQLServer(spark))
+    // Test DataFrame from API
+    val dfProductDetails = getDataFromAPI(spark).withColumnRenamed("aisle", "aisle_pd")
 
     // Join datasets
     val dfJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
-    ("product_name"), "left")
+    ("product_name"), "left").drop("days_since_prior_order", "aisle_pd", "product_name")
 
-    dfProductDetails.write.format("bigquery")
-      .option("table", "test.product_details")
-      .save()
-
-    // Validate Data
-    validateData(dfJoined).write.format("bigquery")
+    // Clean and validate data, then write into a BigQuery table
+    validateData(dfJoined).write.mode("overwrite").format("bigquery")
       .option("table", "test.products")
       .save()
 
@@ -46,7 +42,10 @@ object applaudo_etl {
 
   def getDataFromBlobStorage(spark: SparkSession): DataFrame = {
     val path = s"wasbs://$containerName@$storageAccountName.blob.core.windows.net"
-    spark.read.schema(productSchema).option("header", "false").option("mode", "DROPMALFORMED").csv(path + "/0*.csv")
+    spark.read.schema(productSchema)
+      .option("header", "false")
+      .option("escape", "\"")
+      .option("mode", "DROPMALFORMED").csv(path + "/0*.csv")
 
   }
 
@@ -77,7 +76,7 @@ object applaudo_etl {
     elements.toDF()
   }
 
-  def transformData(dataFromBlob: DataFrame, dataFromSQLServer: DataFrame): DataFrame = {
+  def mergeProductData(dataFromBlob: DataFrame, dataFromSQLServer: DataFrame): DataFrame = {
     dataFromBlob.union(dataFromSQLServer)
       .withColumn("order_detail_array", split(col("order_detail"), "~"))
       .withColumn("order_detail_exploded", explode(col("order_detail_array")))
@@ -85,6 +84,7 @@ object applaudo_etl {
       .withColumn("aisles", split(col("order_detail_exploded"), "\\|").getItem(1))
       .withColumn("number_of_products", split(col("order_detail_exploded"), "\\|").getItem(2).cast(IntegerType))
       .drop("order_detail", "order_detail_array", "order_detail_exploded")
+      .withColumn("product", regexp_replace(col("product"), "[^\\x00-\\x7F]", ""))
   }
 
   def validateData(df: DataFrame): DataFrame = {
