@@ -92,6 +92,8 @@ object applaudo_etl {
       .drop("order_detail", "order_detail_array", "order_detail_exploded")
       .withColumn("product", regexp_replace(col("product"), "[^\\x00-\\x7F]", ""))
       .withColumn("days_since_prior_order", col("days_since_prior_order").cast(IntegerType))
+      .withColumn("order_hour_of_day", when(col("order_hour_of_day") === 24, 0).
+        otherwise(col("order_hour_of_day")))
   }
 
   def validateData(df: DataFrame): DataFrame = {
@@ -145,29 +147,46 @@ object applaudo_etl {
 
   def createClientsSegmentation(df: DataFrame): Unit = {
 
-    def clientsSegmentUdf(m: Map[Int, Int]) = udf((orderDow: Int, dspo: Int, totalProductsBought: Int) => {
+    def clientsSegmentUdf(m: Map[(String, Int), Double]) = udf((orderDow: Int, dspo: Int,
+                                                                totalProductsBought: Int) => {
+
       var segment: String = "Without segment"
-      if (dspo <= 7 && totalProductsBought / m(orderDow) > 0.75) {
+      if (dspo <= 7 && totalProductsBought > m("third", orderDow)) {
         segment = "You've Got a Friend in Me"
-      } else if ((dspo >= 10 && dspo <= 19) && totalProductsBought / m(orderDow) > 0.5) {
+      } else if ((dspo >= 10 && dspo <= 19) && totalProductsBought > m("second", orderDow)) {
         segment = "Baby come Back"
-      } else if (dspo > 20 && totalProductsBought / m(orderDow) > 0.25) {
+      } else if (dspo > 20 && totalProductsBought > m("first", orderDow)) {
         segment = "Special Offers"
       }
       segment
     })
 
-    val soldByDayMap = Map.empty[Int, Int]
+    val quartileMap = Map.empty[(String, Int), Double]
 
-    for (row <- df.groupBy("order_dow").sum("number_of_products").collect) {
-      val key = row.mkString(",").split(",")(0).toInt
-      val value = row.mkString(",").split(",")(1).toInt
-      soldByDayMap(key) = value
+    for (row <- df.groupBy("order_dow", "order_hour_of_day").avg("number_of_products").collect) {
+      val day = row.mkString(",").split(",")(0).toInt
+      val hour = row.mkString(",").split(",")(1).toInt
+      val value = row.mkString(",").split(",")(2).toDouble
+
+      hour match {
+        case h if 0 to 5 contains h =>
+          if (quartileMap.contains(("first", day))) quartileMap(("first", day)) += value else quartileMap(("first",
+            day)) = value
+        case h if 6 to 11 contains h =>
+          if (quartileMap.contains(("second", day))) quartileMap(("second", day)) += value else quartileMap(("second",
+            day)) = value
+        case h if 12 to 17 contains h =>
+          if (quartileMap.contains(("third", day))) quartileMap(("third", day)) += value else quartileMap(("third",
+            day)) = value
+        case h if 18 to 23 contains h =>
+          if (quartileMap.contains(("fourth", day))) quartileMap(("fourth", day)) += value else quartileMap(("fourth",
+            day)) = value
+      }
     }
 
     val window = Window.partitionBy("user_id")
     val newDf = df.withColumn("total_products_bought", sum("number_of_products").over(window))
-      .withColumn("client_segment", clientsSegmentUdf(soldByDayMap)(col("order_dow"),
+      .withColumn("client_segment", clientsSegmentUdf(quartileMap)(col("order_dow"),
         col("days_since_prior_order"), col("total_products_bought")))
       .select("user_id", "client_segment").dropDuplicates("user_id")
 
