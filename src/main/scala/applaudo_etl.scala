@@ -1,3 +1,4 @@
+import org.apache.spark.sql.execution.stat.StatFunctions
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -150,7 +151,7 @@ object applaudo_etl {
     def clientsSegmentUdf(m: Map[(String, Int), Double]) = udf((orderDow: Int, dspo: Int,
                                                                 totalProductsBought: Int) => {
 
-      var segment: String = "Without segment"
+      var segment: String = "Undefined"
       if (dspo <= 7 && totalProductsBought > m("third", orderDow)) {
         segment = "You've Got a Friend in Me"
       } else if ((dspo >= 10 && dspo <= 19) && totalProductsBought > m("second", orderDow)) {
@@ -163,25 +164,12 @@ object applaudo_etl {
 
     val quartileMap = Map.empty[(String, Int), Double]
 
-    for (row <- df.groupBy("order_dow", "order_hour_of_day").avg("number_of_products").collect) {
-      val day = row.mkString(",").split(",")(0).toInt
-      val hour = row.mkString(",").split(",")(1).toInt
-      val value = row.mkString(",").split(",")(2).toDouble
-
-      hour match {
-        case h if 0 to 5 contains h =>
-          if (quartileMap.contains(("first", day))) quartileMap(("first", day)) += value else quartileMap(("first",
-            day)) = value
-        case h if 6 to 11 contains h =>
-          if (quartileMap.contains(("second", day))) quartileMap(("second", day)) += value else quartileMap(("second",
-            day)) = value
-        case h if 12 to 17 contains h =>
-          if (quartileMap.contains(("third", day))) quartileMap(("third", day)) += value else quartileMap(("third",
-            day)) = value
-        case h if 18 to 23 contains h =>
-          if (quartileMap.contains(("fourth", day))) quartileMap(("fourth", day)) += value else quartileMap(("fourth",
-            day)) = value
-      }
+    for (day <- (0 to 6).toList) {
+      val medianAndQuantiles = df.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products", Array(0.25,
+        0.5, 0.75), 0.0)
+      quartileMap(("first", day)) = medianAndQuantiles(0)
+      quartileMap(("second", day)) = medianAndQuantiles(1)
+      quartileMap(("third", day)) = medianAndQuantiles(2)
     }
 
     val window = Window.partitionBy("user_id")
