@@ -5,6 +5,8 @@ import org.apache.spark.sql.{DataFrame, Encoders, SparkSession}
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 
+import scala.collection.mutable.Map
+
 object applaudo_etl {
 
   val key: String = "?sv=2019-12-12&ss=bfqt&srt=sco&sp=rlx&se=2030-07-28T18:45:41Z&st=2020-07-27T10:45:41Z&spr=https" +
@@ -39,7 +41,8 @@ object applaudo_etl {
       .option("table", "test.products")
       .save()
 
-    createClientsCategory(spark, validateData(dfJoined))
+    createClientsCategory(validateData(dfJoined))
+    createClientsSegmentation(validateData(dfJoined))
 
   }
 
@@ -88,6 +91,7 @@ object applaudo_etl {
       .withColumn("number_of_products", split(col("order_detail_exploded"), "\\|").getItem(2).cast(IntegerType))
       .drop("order_detail", "order_detail_array", "order_detail_exploded")
       .withColumn("product", regexp_replace(col("product"), "[^\\x00-\\x7F]", ""))
+      .withColumn("days_since_prior_order", col("days_since_prior_order").cast(IntegerType))
   }
 
   def validateData(df: DataFrame): DataFrame = {
@@ -105,7 +109,7 @@ object applaudo_etl {
     }
   }
 
-  def createClientsCategory(spark: SparkSession, df: DataFrame): Unit = {
+  def createClientsCategory(df: DataFrame): Unit = {
     val momItems = List("dairy eggs", "bakery", "household", "babies")
     val singleItems = List("canned goods", "meat seafood", "alcohol", "snacks", "beverages")
     val petFriendlyItems = List("canned goods", "pets", "frozen")
@@ -123,24 +127,53 @@ object applaudo_etl {
     })
 
     val window = Window.partitionBy("user_id")
-    val test = df.withColumn("total_bought_products", sum("number_of_products").over(window))
+    val newDf = df.withColumn("total_products_bought", sum("number_of_products").over(window))
       .withColumn("mom_products", sum(when(col("department").isin(momItems: _*),
         col("number_of_products")).otherwise(0)).over(window))
       .withColumn("single_products", sum(when(col("department").isin(singleItems: _*),
         col("number_of_products")).otherwise(0)).over(window))
       .withColumn("pet_friendly_products", sum(when(col("department").isin(petFriendlyItems: _*),
         col("number_of_products")).otherwise(0)).over(window))
-      .withColumn("category", clientsCategoryUdf(col("total_bought_products"), col("mom_products"),
+      .withColumn("category", clientsCategoryUdf(col("total_products_bought"), col("mom_products"),
         col("single_products"), col("pet_friendly_products")))
       .select("user_id", "category").dropDuplicates("user_id")
 
-    test.write.mode("overwrite").format("bigquery")
+    newDf.write.mode("overwrite").format("bigquery")
       .option("table", "test.clients_category")
       .save()
   }
 
-  def createClientsSegmentation(spark: SparkSession, df: DataFrame): Unit = {
+  def createClientsSegmentation(df: DataFrame): Unit = {
 
+    def clientsSegmentUdf(m: Map[Int, Int]) = udf((orderDow: Int, dspo: Int, totalProductsBought: Int) => {
+      var segment: String = "Without segment"
+      if (dspo <= 7 && totalProductsBought / m(orderDow) > 0.75) {
+        segment = "You've Got a Friend in Me"
+      } else if ((dspo >= 10 && dspo <= 19) && totalProductsBought / m(orderDow) > 0.5) {
+        segment = "Baby come Back"
+      } else if (dspo > 20 && totalProductsBought / m(orderDow) > 0.25) {
+        segment = "Special Offers"
+      }
+      segment
+    })
+
+    val soldByDayMap = Map.empty[Int, Int]
+
+    for (row <- df.groupBy("order_dow").sum("number_of_products").collect) {
+      val key = row.mkString(",").split(",")(0).toInt
+      val value = row.mkString(",").split(",")(1).toInt
+      soldByDayMap(key) = value
+    }
+
+    val window = Window.partitionBy("user_id")
+    val newDf = df.withColumn("total_products_bought", sum("number_of_products").over(window))
+      .withColumn("client_segment", clientsSegmentUdf(soldByDayMap)(col("order_dow"),
+        col("days_since_prior_order"), col("total_products_bought")))
+      .select("user_id", "client_segment").dropDuplicates("user_id")
+
+    newDf.write.mode("overwrite").format("bigquery")
+      .option("table", "test.clients_segmentation")
+      .save()
   }
 }
 
