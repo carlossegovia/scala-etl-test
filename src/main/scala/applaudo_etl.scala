@@ -1,3 +1,4 @@
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Encoders, SparkSession}
@@ -31,12 +32,14 @@ object applaudo_etl {
 
     // Join datasets
     val dfJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
-    ("product_name"), "left").drop("days_since_prior_order", "aisle_pd", "product_name")
+    ("product_name"), "left").drop("aisle_pd", "product_name")
 
     // Clean and validate data, then write into a BigQuery table
     validateData(dfJoined).write.mode("overwrite").format("bigquery")
       .option("table", "test.products")
       .save()
+
+    createClientsCategory(spark, validateData(dfJoined))
 
   }
 
@@ -100,6 +103,44 @@ object applaudo_etl {
         }
       }
     }
+  }
+
+  def createClientsCategory(spark: SparkSession, df: DataFrame): Unit = {
+    val momItems = List("dairy eggs", "bakery", "household", "babies")
+    val singleItems = List("canned goods", "meat seafood", "alcohol", "snacks", "beverages")
+    val petFriendlyItems = List("canned goods", "pets", "frozen")
+
+    val clientsCategoryUdf = udf((total: Int, mom: Int, single: Int, petFriendly: Int) => {
+      var category: String = "A complete mystery"
+      if (mom / total > 0.5) {
+        category = "Mom"
+      } else if (single / total > 0.6) {
+        category = "Single"
+      } else if (petFriendly / total > 0.3) {
+        category = "Pet Friendly"
+      }
+      category
+    })
+
+    val window = Window.partitionBy("user_id")
+    val test = df.withColumn("total_bought_products", sum("number_of_products").over(window))
+      .withColumn("mom_products", sum(when(col("department").isin(momItems: _*),
+        col("number_of_products")).otherwise(0)).over(window))
+      .withColumn("single_products", sum(when(col("department").isin(singleItems: _*),
+        col("number_of_products")).otherwise(0)).over(window))
+      .withColumn("pet_friendly_products", sum(when(col("department").isin(petFriendlyItems: _*),
+        col("number_of_products")).otherwise(0)).over(window))
+      .withColumn("category", clientsCategoryUdf(col("total_bought_products"), col("mom_products"),
+        col("single_products"), col("pet_friendly_products")))
+      .select("user_id", "category").dropDuplicates("user_id")
+
+    test.write.mode("overwrite").format("bigquery")
+      .option("table", "test.clients_category")
+      .save()
+  }
+
+  def createClientsSegmentation(spark: SparkSession, df: DataFrame): Unit = {
+
   }
 }
 
