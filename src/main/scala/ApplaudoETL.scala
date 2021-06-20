@@ -13,7 +13,7 @@ case class Product(order_id: Long, user_id: Long, order_number: Int, order_dow: 
                    days_since_prior_order: Float, order_detail: String)
 
 
-object applaudo_etl {
+object ApplaudoETL {
 
   val SasKey = "?sv=2019-12-12&ss=bfqt&srt=sco&sp=rlx&se=2030-07-28T18:45:41Z&st=2020-07-27T10:45:41Z&spr=https" +
     "&sig" +
