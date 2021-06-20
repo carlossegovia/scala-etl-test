@@ -7,44 +7,49 @@ import org.json4s.jackson.JsonMethods._
 
 import scala.collection.mutable.Map
 
+case class ProductDetail(product_name: String, aisle: String, department: String)
+
+case class Product(order_id: Long, user_id: Long, order_number: Int, order_dow: Int, order_hour_of_day: Int,
+                   days_since_prior_order: Float, order_detail: String)
+
+
 object applaudo_etl {
 
-  val key: String = "?sv=2019-12-12&ss=bfqt&srt=sco&sp=rlx&se=2030-07-28T18:45:41Z&st=2020-07-27T10:45:41Z&spr=https" +
+  val SasKey = "?sv=2019-12-12&ss=bfqt&srt=sco&sp=rlx&se=2030-07-28T18:45:41Z&st=2020-07-27T10:45:41Z&spr=https" +
     "&sig" +
     "=cJncLH0UHtfEK1txVC2BNCAwJqvcBrAt5QS2XeL9bUE%3D"
-  val containerName: String = "ordersdow"
-  val storageAccountName: String = "orderstg"
-  val productSchema = Encoders.product[Product].schema
-  // BigQuery parameters
-  val bucket = "test-bucket-concrete-flare-312721"
+  val ContainerName = "ordersdow"
+  val StorageAccountName = "orderstg"
+  val ProductSchema = Encoders.product[Product].schema
+  val BqBucket = "test-bucket-concrete-flare-312721"
 
 
   def main(args: Array[String]): Unit = {
 
-    //    val spark = SparkSession.builder.appName("ScalaTest").master("local[*]").getOrCreate()
     val spark = SparkSession.builder.appName("AppaludoETL").getOrCreate()
-    spark.conf.set(s"fs.azure.sas.$containerName.$storageAccountName.blob.core.windows.net", key)
-    spark.conf.set("temporaryGcsBucket", bucket)
+    spark.conf.set(s"fs.azure.sas.$ContainerName.$StorageAccountName.blob.core.windows.net", SasKey)
+    spark.conf.set("temporaryGcsBucket", BqBucket)
 
-    // Merge both Product's DataFrames
-    val dfProducts = mergeProductData(getDataFromBlobStorage(spark), getDataFromSQLServer(spark))
+    // Merge Product's data from Azure Blob Storage and SQL Server
+    val dfProducts = mergeAndTransformProductData(getDataFromBlobStorage(spark), getDataFromSQLServer(spark))
 
-    // Test DataFrame from API
+    // Get Product's Detail data from API
     val dfProductDetails = getDataFromAPI(spark).withColumnRenamed("aisle", "aisle_pd")
 
-    // Join datasets
-    val dfJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
+    // Join Product's and Product's Detail data
+    val dfProductJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
     ("product_name"), "left").drop("aisle_pd", "product_name")
 
-    // Clean and validate data, then write into a BigQuery table
-    validateData(dfJoined).write.mode("overwrite").format("bigquery")
+    // Clean and validate data values, then write into a BigQuery table
+    val dfValidated = validateDataValues(dfProductJoined)
+
+    dfValidated.write.mode("overwrite").format("bigquery")
       .option("table", "test.products")
       .save()
 
     // Create the table with the Clients Category and Segmentation
-
-    val dfCategory = createClientsCategory(validateData(dfJoined))
-    val dfSegmentation = createClientsSegmentation(validateData(dfJoined))
+    val dfCategory = getClientsCategory(dfValidated)
+    val dfSegmentation = getClientsSegmentation(dfValidated)
     val dfClients = dfCategory.join(dfSegmentation, Seq("user_id"))
 
     dfClients.write.mode("overwrite").format("bigquery")
@@ -53,16 +58,23 @@ object applaudo_etl {
 
   }
 
+  /**
+    * Fetch Products data from Azure Blob Storage and return it in a DataFrame.
+    *
+    */
   def getDataFromBlobStorage(spark: SparkSession): DataFrame = {
-    val path = s"wasbs://$containerName@$storageAccountName.blob.core.windows.net"
-    spark.read.schema(productSchema)
+    val path = s"wasbs://$ContainerName@$StorageAccountName.blob.core.windows.net"
+    spark.read.schema(ProductSchema)
       .option("header", "false")
       .option("escape", "\"")
       .option("mode", "DROPMALFORMED").csv(path + "/0*.csv")
 
   }
 
-
+  /**
+    * Fetch Products data from a SQL Server instance and return it in a DataFrame.
+    *
+    */
   def getDataFromSQLServer(spark: SparkSession): DataFrame = {
     val df = spark.read
       .format("jdbc")
@@ -73,23 +85,39 @@ object applaudo_etl {
       .option("password", "Etltest_2020")
       .load()
 
-    productSchema.fields.foldLeft(df) {
+    ProductSchema.fields.foldLeft(df) {
       (df, s) => df.withColumn(s.name, df(s.name).cast(s.dataType))
     }
   }
 
+  /**
+    * Fetch Products Detail data from an API and return it in a DataFrame.
+    *
+    *
+    */
   def getDataFromAPI(spark: SparkSession): DataFrame = {
     val url = "https://etlwebapp.azurewebsites.net/api/products"
     implicit val formats = DefaultFormats
     val data = List(scala.io.Source.fromURL(url).mkString)(0)
-    val jsonData = parse(data)
-    val elements = (jsonData \\ "results" \\ "items").children.map(_.extract[ProductDetail])
+    val elements = (parse(data) \\ "results" \\ "items").children.map(_.extract[ProductDetail])
     // For implicit conversions like converting RDDs to DataFrames
     import spark.implicits._
     elements.toDF()
   }
 
-  def mergeProductData(dataFromBlob: DataFrame, dataFromSQLServer: DataFrame): DataFrame = {
+  /**
+    * Make an union to merge the two given DataFrames and clean the fields with unexpected (bad) format. Also,
+    * split and explode the original `order_detail` column in multiples ones to accomplish the desired requirements.
+    * Notes:
+    * Cleaned the `product` column that has non-ascii characters
+    * Casted the `days_since_prior_order` column from Double to Int
+    * Transformed unexpected data from the `order_hour_of_day` column
+    *
+    * @param dataFromBlob      Product DataFrame fetched from Azure Blob Storage
+    * @param dataFromSQLServer Product DataFrame fetched from SQL Server
+    * @return Product DataFrame with appropriate data types
+    */
+  def mergeAndTransformProductData(dataFromBlob: DataFrame, dataFromSQLServer: DataFrame): DataFrame = {
     dataFromBlob.union(dataFromSQLServer)
       .withColumn("order_detail_array", split(col("order_detail"), "~"))
       .withColumn("order_detail_exploded", explode(col("order_detail_array")))
@@ -103,26 +131,37 @@ object applaudo_etl {
         otherwise(col("order_hour_of_day")))
   }
 
-  def validateData(df: DataFrame): DataFrame = {
-    df.schema.fields.foldLeft(df) {
-      (df, s) => {
-        s.dataType match {
-          case _: StringType => df.withColumn(s.name, trim(df(s.name)))
-          case _: IntegerType => df.withColumn(s.name, abs(df(s.name)))
-          case _: LongType => df.withColumn(s.name, abs(df(s.name)))
-          case _: FloatType => df.withColumn(s.name, abs(df(s.name)))
-          case _: DoubleType => df.withColumn(s.name, abs(df(s.name)))
-          case _ => df.withColumn(s.name, df(s.name))
+  /**
+    * Validate that all columns in Product DataFrame have the correct range of values.
+    * Notes:
+    * Numeric columns cannot be < 0.
+    * Delete white-spaces from string columns.
+    */
+  def validateDataValues(dfProduct: DataFrame): DataFrame = {
+    dfProduct.schema.fields.foldLeft(dfProduct) {
+      (df, column) => {
+        column.dataType match {
+          case _: StringType => df.withColumn(column.name, trim(df(column.name)))
+          case _: IntegerType => df.withColumn(column.name, abs(df(column.name)))
+          case _: LongType => df.withColumn(column.name, abs(df(column.name)))
+          case _: FloatType => df.withColumn(column.name, abs(df(column.name)))
+          case _: DoubleType => df.withColumn(column.name, abs(df(column.name)))
+          case _ => df.withColumn(column.name, df(column.name))
         }
       }
     }
   }
 
-  def createClientsCategory(df: DataFrame): DataFrame = {
+  /**
+    * A DataFrame it's returned with clients classified in different categories according to their orders behavior.
+    *
+    */
+  def getClientsCategory(dfProducts: DataFrame): DataFrame = {
     val momItems = List("dairy eggs", "bakery", "household", "babies")
     val singleItems = List("canned goods", "meat seafood", "alcohol", "snacks", "beverages")
     val petFriendlyItems = List("canned goods", "pets", "frozen")
 
+    // UDF to Classify clients according to the established rules
     val clientsCategoryUdf = udf((total: Int, mom: Int, single: Int, petFriendly: Int) => {
       var category: String = "A complete mystery"
       if (mom / total > 0.5) {
@@ -136,7 +175,8 @@ object applaudo_etl {
     })
 
     val window = Window.partitionBy("user_id")
-    val newDf = df.withColumn("total_products_bought", sum("number_of_products").over(window))
+
+    dfProducts.withColumn("total_products_bought", sum("number_of_products").over(window))
       .withColumn("mom_products", sum(when(col("department").isin(momItems: _*),
         col("number_of_products")).otherwise(0)).over(window))
       .withColumn("single_products", sum(when(col("department").isin(singleItems: _*),
@@ -146,15 +186,17 @@ object applaudo_etl {
       .withColumn("category", clientsCategoryUdf(col("total_products_bought"), col("mom_products"),
         col("single_products"), col("pet_friendly_products")))
       .select("user_id", "category").dropDuplicates("user_id")
-
-    newDf
   }
 
-  def createClientsSegmentation(df: DataFrame): DataFrame = {
+  /**
+    * A DataFrame it's returned with clients segmented according to the established rules.
+    *
+    */
+  def getClientsSegmentation(dfProducts: DataFrame): DataFrame = {
 
+    // UDF to Segment clients according to the established rules.
     def clientsSegmentUdf(m: Map[(String, Int), Double]) = udf((orderDow: Int, dspo: Int,
                                                                 totalProductsBought: Int) => {
-
       var segment: String = "Undefined"
       if (dspo <= 7 && totalProductsBought > m("third", orderDow)) {
         segment = "You've Got a Friend in Me"
@@ -166,10 +208,11 @@ object applaudo_etl {
       segment
     })
 
+    // The Quartiles of every day are calculated and passed like param to the Client Segment UDF
     val quartileMap = Map.empty[(String, Int), Double]
-
     for (day <- (0 to 6).toList) {
-      val medianAndQuantiles = df.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products", Array(0.25,
+      val medianAndQuantiles = dfProducts.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products",
+        Array(0.25,
         0.5, 0.75), 0.0)
       quartileMap(("first", day)) = medianAndQuantiles(0)
       quartileMap(("second", day)) = medianAndQuantiles(1)
@@ -177,16 +220,11 @@ object applaudo_etl {
     }
 
     val window = Window.partitionBy("user_id")
-    val newDf = df.withColumn("total_products_bought", sum("number_of_products").over(window))
+    dfProducts.withColumn("total_products_bought", sum("number_of_products").over(window))
       .withColumn("client_segment", clientsSegmentUdf(quartileMap)(col("order_dow"),
         col("days_since_prior_order"), col("total_products_bought")))
       .select("user_id", "client_segment").dropDuplicates("user_id")
-    newDf
   }
 }
 
 
-case class ProductDetail(product_name: String, aisle: String, department: String)
-
-case class Product(order_id: Long, user_id: Long, order_number: Int, order_dow: Int, order_hour_of_day: Int,
-                   days_since_prior_order: Float, order_detail: String)
