@@ -29,7 +29,7 @@ object StartETL {
     val options = nextOption(Map(), argList)
     val spark = SparkSession.builder.appName("ApplaudoETL").master("local[*]").getOrCreate()
 
-    val resultPath = if (options.contains("result_path")) options("properties_path") else ""
+    val resultPath = if (options.contains("result_path")) options("result_path") else ""
 
     val applaudoETL = new ApplaudoETL(spark, resultPath)
     applaudoETL.start()
