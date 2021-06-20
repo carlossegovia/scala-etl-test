@@ -3,10 +3,10 @@ import org.apache.spark.sql.SparkSession
 object StartETL {
   val usage =
     """
-    Usage: ApplaudoETL.jar [-p string]
-    Optional: [-p string]
+    Usage: ApplaudoETL.jar [-r string]
+    Optional: [-r string]
     Description:
-    -r: Result path.            Path to store parquet files.
+    -r: Result path.    Path to store the result tables in parquet format.
     Notes:
       If the results path is not provided, the results will be printed in console
     """

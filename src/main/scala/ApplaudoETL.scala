@@ -24,14 +24,10 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
   private val StorageAccountName = properties.getProperty("azure.storage.account.name")
   private val ProductSchema = Encoders.product[Product].schema
 
-  //  Delete after
-  val BqBucket = "test-bucket-concrete-flare-312721"
-
 
   def start(): Unit = {
 
     spark.conf.set(s"fs.azure.sas.$ContainerName.$StorageAccountName.blob.core.windows.net", SasKey)
-    spark.conf.set("temporaryGcsBucket", BqBucket)
 
     // Merge Product's data from Azure Blob Storage and SQL Server
     val dfProducts = mergeAndTransformProductData(getDataFromBlobStorage(spark), getDataFromSQLServer(spark))
@@ -40,6 +36,7 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
     val dfProductDetails = getDataFromAPI(spark).withColumnRenamed("aisle", "aisle_pd")
 
     // Join Product's and Product's Detail data
+    // `broadcast` is used to get better performance and because the DataFrame of ProductDetails is small enough
     val dfProductJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
     ("product_name"), "left").drop("aisle_pd", "product_name")
 
@@ -217,6 +214,7 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
     })
 
     // The Quartiles of every day are calculated and passed like param to the Client Segment UDF
+    // The function approxQuantile is used with 0.0 in the third argument, this way the results are exact and not approximations
     val quartileMap = mutable.Map.empty[(String, Int), Double]
     for (day <- (0 to 6).toList) {
       val medianAndQuantiles = dfProducts.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products",
