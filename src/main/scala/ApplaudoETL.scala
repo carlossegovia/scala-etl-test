@@ -78,14 +78,23 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
 
   /**
     * Fetch Products data from a SQL Server instance and return it in a DataFrame.
+    * The data is fetched using a custom query that compares the field `order_id`, por default orderId = -1, this means
+    * that all data in the table will be returned.
+    * By providing a value for `order_id` field, new records can be consumed in the table without repeating those
+    * already obtained in previous executions, since each `order_id` field is unique and it is assumed that the new
+    * data will have higher values.
     *
     */
-  def getDataFromSQLServer(spark: SparkSession): DataFrame = {
+  def getDataFromSQLServer(spark: SparkSession, orderId: Int = -1): DataFrame = {
+
+    val query = s"(select * from ${properties.getProperty("mssql.dbtable")} where CAST(order_id AS int) > $orderId) " +
+      s"as t"
+
     val df = spark.read
       .format("jdbc")
       .option("driver", properties.getProperty("mssql.driver"))
       .option("url", properties.getProperty("mssql.url"))
-      .option("dbtable", properties.getProperty("mssql.dbtable"))
+      .option("dbtable", query)
       .option("user", properties.getProperty("mssql.user"))
       .option("password", properties.getProperty("mssql.password"))
       .load()
@@ -214,7 +223,8 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
     })
 
     // The Quartiles of every day are calculated and passed like param to the Client Segment UDF
-    // The function approxQuantile is used with 0.0 in the third argument, this way the results are exact and not approximations
+    // The function approxQuantile is used with 0.0 in the third argument, this way the results are exact and not
+    // approximations
     val quartileMap = mutable.Map.empty[(String, Int), Double]
     for (day <- (0 to 6).toList) {
       val medianAndQuantiles = dfProducts.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products",
