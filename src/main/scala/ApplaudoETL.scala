@@ -1,3 +1,6 @@
+import java.io.InputStream
+import java.util.Properties
+
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -5,7 +8,7 @@ import org.apache.spark.sql.{DataFrame, Encoders, SparkSession}
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 
-import scala.collection.mutable.Map
+import scala.collection.mutable
 
 case class ProductDetail(product_name: String, aisle: String, department: String)
 
@@ -13,20 +16,20 @@ case class Product(order_id: Long, user_id: Long, order_number: Int, order_dow: 
                    days_since_prior_order: Float, order_detail: String)
 
 
-object ApplaudoETL {
+class ApplaudoETL(spark: SparkSession, resultPath: String) {
 
-  val SasKey = "?sv=2019-12-12&ss=bfqt&srt=sco&sp=rlx&se=2030-07-28T18:45:41Z&st=2020-07-27T10:45:41Z&spr=https" +
-    "&sig" +
-    "=cJncLH0UHtfEK1txVC2BNCAwJqvcBrAt5QS2XeL9bUE%3D"
-  val ContainerName = "ordersdow"
-  val StorageAccountName = "orderstg"
-  val ProductSchema = Encoders.product[Product].schema
+  private val properties = getProperties
+  private val SasKey = properties.getProperty("azure.sas_key")
+  private val ContainerName = properties.getProperty("azure.storage.container.name")
+  private val StorageAccountName = properties.getProperty("azure.storage.account.name")
+  private val ProductSchema = Encoders.product[Product].schema
+
+  //  Delete after
   val BqBucket = "test-bucket-concrete-flare-312721"
 
 
-  def main(args: Array[String]): Unit = {
+  def start(): Unit = {
 
-    val spark = SparkSession.builder.appName("AppaludoETL").getOrCreate()
     spark.conf.set(s"fs.azure.sas.$ContainerName.$StorageAccountName.blob.core.windows.net", SasKey)
     spark.conf.set("temporaryGcsBucket", BqBucket)
 
@@ -40,22 +43,27 @@ object ApplaudoETL {
     val dfProductJoined = dfProducts.join(broadcast(dfProductDetails), dfProducts("product") === dfProductDetails
     ("product_name"), "left").drop("aisle_pd", "product_name")
 
-    // Clean and validate data values, then write into a BigQuery table
+    // Clean and validate data values
     val dfValidated = validateDataValues(dfProductJoined)
 
-    dfValidated.write.mode("overwrite").format("bigquery")
-      .option("table", "test.products")
-      .save()
+    // Show on Console or write parquet files
+    if (!resultPath.isEmpty) {
+      storeData(dfValidated, "products")
+    } else {
+      dfValidated.show(10, truncate = false)
+    }
 
     // Create the table with the Clients Category and Segmentation
     val dfCategory = getClientsCategory(dfValidated)
     val dfSegmentation = getClientsSegmentation(dfValidated)
     val dfClients = dfCategory.join(dfSegmentation, Seq("user_id"))
 
-    dfClients.write.mode("overwrite").format("bigquery")
-      .option("table", "test.clients")
-      .save()
-
+    // Show on Console or write parquet files
+    if (!resultPath.isEmpty) {
+      storeData(dfClients, "clients")
+    } else {
+      dfClients.show(10, truncate = false)
+    }
   }
 
   /**
@@ -78,11 +86,11 @@ object ApplaudoETL {
   def getDataFromSQLServer(spark: SparkSession): DataFrame = {
     val df = spark.read
       .format("jdbc")
-      .option("driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver")
-      .option("url", "jdbc:sqlserver://orderservers.database.windows.net;database=orderdb")
-      .option("dbtable", "dbo.order_details")
-      .option("user", "etlguest")
-      .option("password", "Etltest_2020")
+      .option("driver", properties.getProperty("mssql.driver"))
+      .option("url", properties.getProperty("mssql.url"))
+      .option("dbtable", properties.getProperty("mssql.dbtable"))
+      .option("user", properties.getProperty("mssql.user"))
+      .option("password", properties.getProperty("mssql.password"))
       .load()
 
     ProductSchema.fields.foldLeft(df) {
@@ -96,7 +104,7 @@ object ApplaudoETL {
     *
     */
   def getDataFromAPI(spark: SparkSession): DataFrame = {
-    val url = "https://etlwebapp.azurewebsites.net/api/products"
+    val url = properties.getProperty("api.url")
     implicit val formats = DefaultFormats
     val data = List(scala.io.Source.fromURL(url).mkString)(0)
     val elements = (parse(data) \\ "results" \\ "items").children.map(_.extract[ProductDetail])
@@ -195,8 +203,8 @@ object ApplaudoETL {
   def getClientsSegmentation(dfProducts: DataFrame): DataFrame = {
 
     // UDF to Segment clients according to the established rules.
-    def clientsSegmentUdf(m: Map[(String, Int), Double]) = udf((orderDow: Int, dspo: Int,
-                                                                totalProductsBought: Int) => {
+    def clientsSegmentUdf(m: mutable.Map[(String, Int), Double]) = udf((orderDow: Int, dspo: Int,
+                                                                        totalProductsBought: Int) => {
       var segment: String = "Undefined"
       if (dspo <= 7 && totalProductsBought > m("third", orderDow)) {
         segment = "You've Got a Friend in Me"
@@ -209,11 +217,11 @@ object ApplaudoETL {
     })
 
     // The Quartiles of every day are calculated and passed like param to the Client Segment UDF
-    val quartileMap = Map.empty[(String, Int), Double]
+    val quartileMap = mutable.Map.empty[(String, Int), Double]
     for (day <- (0 to 6).toList) {
       val medianAndQuantiles = dfProducts.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products",
         Array(0.25,
-        0.5, 0.75), 0.0)
+          0.5, 0.75), 0.0)
       quartileMap(("first", day)) = medianAndQuantiles(0)
       quartileMap(("second", day)) = medianAndQuantiles(1)
       quartileMap(("third", day)) = medianAndQuantiles(2)
@@ -224,6 +232,25 @@ object ApplaudoETL {
       .withColumn("client_segment", clientsSegmentUdf(quartileMap)(col("order_dow"),
         col("days_since_prior_order"), col("total_products_bought")))
       .select("user_id", "client_segment").dropDuplicates("user_id")
+  }
+
+  /**
+    * Get necessary properties to access Azure Blob Storage, MSSQL and API data
+    *
+    */
+  def getProperties: Properties = {
+    val stream: InputStream = getClass.getResourceAsStream("application.properties")
+    val properties = new Properties()
+    properties.load(stream)
+    properties
+  }
+
+  /**
+    * Write parquet files with the ETL results
+    *
+    */
+  def storeData(df: DataFrame, tableName: String): Unit = {
+    df.write.mode("overwrite").parquet(s"$resultPath/$tableName")
   }
 }
 
