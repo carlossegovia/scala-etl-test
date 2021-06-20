@@ -1,6 +1,6 @@
 # Applaudo Studio ETL Test
 
-This project written in Scala fetch data from different sources, clean and transform the data to finally store them in parquet files or show an example of the final tables in console.
+This project written in Scala fetch data from different sources, clean and transform the data to finally store them in parquet files or show an example of the final tables on console.
 
 ## Tech
 * Scala 2.12.7
@@ -9,7 +9,8 @@ This project written in Scala fetch data from different sources, clean and trans
 
 ## How to use? 
 
-### Local mode
+It's only necessary to download the project and generate the JAR. 
+
 1. Clone the project:
     ```sh
     $ git clone https://github.com/carlossegovia/compactHDFSFiles.git
@@ -21,38 +22,16 @@ This project written in Scala fetch data from different sources, clean and trans
     *The JAR file will be generate in __./applaudoTest/target/scala-2.12/ApplaudoETL.jar__*
 
 3. Execute:
-    ```sh
-    $ scala pathToJAR/ApplaudoETL.jar
+   1. Execute with Intellij
+   2. Spark local mode
+   ```sh
+    $ spark-submit --master local  --name ApplaudoETL --class StartETL pathToJAR/ApplaudoETL.jar --jars pathToJAR/mssql-jdbc-9.2.1.jre8.jar
     ```
-    *Help:*
-
-    ```sh
-    Usage: ApplaudoETL.jar [-r string]
-    Optional: [-r string]
-    Description:
-    -r: Result path.    Path to store the result tables in parquet format.
-    Notes:
-      If the results path is not provided, the results will be printed in console
-    ```    
-
-### Cluster mode
-
-Assuming you have a Cluster with a functionally environment of Apache Spark, you just need to download the project and generate the JAR. 
-
-1. Clone the project:
-    ```sh
-    $ git clone https://github.com/carlossegovia/compactHDFSFiles.git
-    ```
- 2. Compile the project with SBT:
-    ```sh
-    $ sbt clean package
-    ```
-    *The JAR file will be generate in __./applaudoTest/target/scala-2.12/ApplaudoETL.jar__*
-
-3. Execute the JAR with Apache Spark:
+   3. Spark cluster mode
     ```sh
     $ spark-submit --master yarn --deploy-mode cluster --name ApplaudoETL --class StartETL pathToJAR/ApplaudoETL.jar --jars pathToJAR/mssql-jdbc-9.2.1.jre8.jar
     ```
+ 
     *Help:*
 
     ```sh
@@ -75,10 +54,28 @@ A dashboard created with Google Data Studio is available [here](https://datastud
 
 ## Expected results
 
-Two tables are expected after ran the code: 
+Two tables are expected after running the code: 
 * Products: Contains all the information about sold products.
-
+```sh
++--------+-------+------------+---------+-----------------+----------------------+--------------------+--------------------+------------------+------------+
+|order_id|user_id|order_number|order_dow|order_hour_of_day|days_since_prior_order|             product|              aisles|number_of_products|  department|
++--------+-------+------------+---------+-----------------+----------------------+--------------------+--------------------+------------------+------------+
+| 1000867| 198377|           5|        0|               14|                     9|Triscuit Baked Wh...|            crackers|                 8|      snacks|
+| 1000867| 198377|           5|        0|               14|                     9|Nutter Butter Coo...|       cookies cakes|                10|      snacks|
+| 1000867| 198377|           5|        0|               14|                     9|    Chili With Beans|  canned meals beans|                 6|canned goods|
+| 1000867| 198377|           5|        0|               14|                     9|Zingers Raspberry...|       cookies cakes|                 6|      snacks|
+| 1000867| 198377|           5|        0|               14|                     9|        Ho Hos Cakes|       cookies cakes|                13|      snacks|
+| 1000867| 198377|           5|        0|               14|                     9|Small Curd Cottag...|other creams cheeses|                14|  dairy eggs|
+| 1000867| 198377|           5|        0|               14|                     9| Original Corn Chips|      chips pretzels|                14|      snacks|
+| 1000867| 198377|           5|        0|               14|                     9|Original Citrus S...|         soft drinks|                13|   beverages|
+|  100258| 156548|          29|        0|               23|                    15|Stage 2 Spinach, ...|   baby food formula|                12|      babies|
+|  100258| 156548|          29|        0|               23|                    15| Colby Cheese Sticks|     packaged cheese|                 2|  dairy eggs|
++--------+-------+------------+---------+-----------------+----------------------+--------------------+--------------------+------------------+------------+
+only showing top 10 rows
+```
 * Clients: Contains the Client Category and Segmentation required by Marketing and Customer Loyalty Departments
+
+```sh
 +-------+------------------+-------------------------+
 |user_id|category          |client_segment           |
 +-------+------------------+-------------------------+
@@ -94,3 +91,4 @@ Two tables are expected after ran the code:
 |7747   |A complete mystery|Baby come Back           |
 +-------+------------------+-------------------------+
 only showing top 10 rows
+```
