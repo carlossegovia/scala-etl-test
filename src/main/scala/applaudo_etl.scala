@@ -1,4 +1,3 @@
-import org.apache.spark.sql.execution.stat.StatFunctions
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -42,8 +41,15 @@ object applaudo_etl {
       .option("table", "test.products")
       .save()
 
-    createClientsCategory(validateData(dfJoined))
-    createClientsSegmentation(validateData(dfJoined))
+    // Create the table with the Clients Category and Segmentation
+
+    val dfCategory = createClientsCategory(validateData(dfJoined))
+    val dfSegmentation = createClientsSegmentation(validateData(dfJoined))
+    val dfClients = dfCategory.join(dfSegmentation, Seq("user_id"))
+
+    dfClients.write.mode("overwrite").format("bigquery")
+      .option("table", "test.clients")
+      .save()
 
   }
 
@@ -112,7 +118,7 @@ object applaudo_etl {
     }
   }
 
-  def createClientsCategory(df: DataFrame): Unit = {
+  def createClientsCategory(df: DataFrame): DataFrame = {
     val momItems = List("dairy eggs", "bakery", "household", "babies")
     val singleItems = List("canned goods", "meat seafood", "alcohol", "snacks", "beverages")
     val petFriendlyItems = List("canned goods", "pets", "frozen")
@@ -141,12 +147,10 @@ object applaudo_etl {
         col("single_products"), col("pet_friendly_products")))
       .select("user_id", "category").dropDuplicates("user_id")
 
-    newDf.write.mode("overwrite").format("bigquery")
-      .option("table", "test.clients_category")
-      .save()
+    newDf
   }
 
-  def createClientsSegmentation(df: DataFrame): Unit = {
+  def createClientsSegmentation(df: DataFrame): DataFrame = {
 
     def clientsSegmentUdf(m: Map[(String, Int), Double]) = udf((orderDow: Int, dspo: Int,
                                                                 totalProductsBought: Int) => {
@@ -177,10 +181,7 @@ object applaudo_etl {
       .withColumn("client_segment", clientsSegmentUdf(quartileMap)(col("order_dow"),
         col("days_since_prior_order"), col("total_products_bought")))
       .select("user_id", "client_segment").dropDuplicates("user_id")
-
-    newDf.write.mode("overwrite").format("bigquery")
-      .option("table", "test.clients_segmentation")
-      .save()
+    newDf
   }
 }
 
