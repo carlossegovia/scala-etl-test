@@ -1,6 +1,8 @@
 import java.io.InputStream
 import java.util.Properties
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -16,7 +18,8 @@ case class Product(order_id: Long, user_id: Long, order_number: Int, order_dow: 
                    days_since_prior_order: Float, order_detail: String)
 
 
-class ApplaudoETL(spark: SparkSession, resultPath: String) {
+class ApplaudoETL(spark: SparkSession, resultPath: String, productsTableName: String = "products",
+                  clientsTableName: String = "clients") {
 
   private val properties = getProperties
   private val SasKey = properties.getProperty("azure.sas_key")
@@ -45,7 +48,7 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
 
     // Show on Console or write parquet files
     if (!resultPath.isEmpty) {
-      storeData(dfValidated, "products")
+      storeData(dfValidated, productsTableName)
     } else {
       dfValidated.show(10, truncate = false)
     }
@@ -57,7 +60,7 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
 
     // Show on Console or write parquet files
     if (!resultPath.isEmpty) {
-      storeData(dfClients, "clients")
+      storeData(dfClients, clientsTableName)
     } else {
       dfClients.show(10, truncate = false)
     }
@@ -65,24 +68,43 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
 
   /**
     * Fetch Products data from Azure Blob Storage and return it in a DataFrame.
-    *
+    * A list of files are fetched according to the `fileNumber` parameter, by default fileNumber = -1, this means
+    * that all data in the directory will be returned.
+    * By providing a value for `fileNumber` parameter, new files can be consumed from the Directory without repeating
+    * those already obtained in previous executions. This works by assuming that the new data will arrive in files
+    * with higher values names.
     */
-  def getDataFromBlobStorage(spark: SparkSession): DataFrame = {
+  def getDataFromBlobStorage(spark: SparkSession, fileNumber: Int = -1): DataFrame = {
     val path = s"wasbs://$ContainerName@$StorageAccountName.blob.core.windows.net"
+    spark.read.csv(s"$path/00.csv")
+    val listFiles = getFileNames(path, fileNumber)
+
     spark.read.schema(ProductSchema)
       .option("header", "false")
       .option("escape", "\"")
-      .option("mode", "DROPMALFORMED").csv(path + "/0*.csv")
+      .option("mode", "DROPMALFORMED").csv(listFiles: _*)
+  }
 
+  /**
+    * Return the list of files inside a Directory that have a higher numeric value of the `fileNumber` parameter.
+    * e.g. `fileNumber` = 2 and there exists these files in a directory: 01.csv, 02.csv, 03.csv and 04.csv
+    * The output will be an Array with 03.csv and 04.csv
+    *
+    */
+  def getFileNames(path: String, fileNumber: Int): Array[String] = {
+    val fs = FileSystem.get(new java.net.URI(path), new Configuration())
+    val status = fs.listStatus(new Path(path))
+    status.filter(x => x.getPath.toString.split("/").last.split("\\.").head.toInt > fileNumber)
+      .map(x => x.getPath.toString)
   }
 
   /**
     * Fetch Products data from a SQL Server instance and return it in a DataFrame.
-    * The data is fetched using a custom query that compares the field `order_id`, por default orderId = -1, this means
+    * The data is fetched using a custom query that compares the field `order_id`, by default orderId = -1, this means
     * that all data in the table will be returned.
-    * By providing a value for `order_id` field, new records can be consumed in the table without repeating those
-    * already obtained in previous executions, since each `order_id` field is unique and it is assumed that the new
-    * data will have higher values.
+    * By providing a value for `order_id` field, new records can be consumed from the SQL Server table without
+    * repeating those already obtained in previous executions, since each `order_id` field is unique and it is assumed
+    * that the new data will have higher values.
     *
     */
   def getDataFromSQLServer(spark: SparkSession, orderId: Int = -1): DataFrame = {
@@ -254,7 +276,9 @@ class ApplaudoETL(spark: SparkSession, resultPath: String) {
   }
 
   /**
-    * Write parquet files with the ETL results
+    * Write parquet files with the ETL results.
+    * The `tableName` parameter allows storing new data from different executions in different places
+    * This method could be easily changed to store the data in many DB's like BigQuery, Hive, Redshift, etc.
     *
     */
   def storeData(df: DataFrame, tableName: String): Unit = {
