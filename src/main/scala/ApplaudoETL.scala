@@ -249,9 +249,8 @@ class ApplaudoETL(spark: SparkSession, resultPath: String, productsTableName: St
     // approximations
     val quartileMap = mutable.Map.empty[(String, Int), Double]
     for (day <- (0 to 6).toList) {
-      val medianAndQuantiles = dfProducts.filter(col("order_dow") === 1).stat.approxQuantile("number_of_products",
-        Array(0.25,
-          0.5, 0.75), 0.0)
+      val medianAndQuantiles = dfProducts.filter(col("order_dow") === day).stat.approxQuantile("number_of_products",
+        Array(0.25, 0.5, 0.75), 0.0)
       quartileMap(("first", day)) = medianAndQuantiles(0)
       quartileMap(("second", day)) = medianAndQuantiles(1)
       quartileMap(("third", day)) = medianAndQuantiles(2)
